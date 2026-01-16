@@ -1,0 +1,8 @@
+#!/usr/bin/env sh
+
+set -eux
+
+adb push "$1" /data/local/tmp/wisp
+adb shell chmod +x /data/local/tmp/wisp
+shift
+adb shell /data/local/tmp/wisp "$@"
