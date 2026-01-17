@@ -4,11 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-clear-cache = "0.1"
 dynasmrt = "4.0"
 libc = "1.0.0-alpha.2"
-linked_list_allocator = "0.10"
-syscalls = "0.7"
+region = "3.0"
 thiserror = "2"
 
 [dev-dependencies]
