@@ -1,6 +1,7 @@
 #[macro_export]
 macro_rules! asmgen {
     ($($body: tt)*) => {
+        // Todo: best practice?
         {
             let mut ops = dynasmrt::aarch64::Assembler::new()?;
 

@@ -1,59 +1,165 @@
+extern crate core;
+
 use crate::result::WispResult;
+use crate::trampoline::TrampolineAllocator;
 use dynasmrt::{dynasm, DynasmApi};
+use libc::{PROT_EXEC, PROT_READ, PROT_WRITE, _SC_PAGESIZE};
+use std::ffi::c_void;
 use std::fs::OpenOptions;
-use std::io::{Seek, Write};
-use std::io;
+use std::io::{Seek, SeekFrom, Write};
+use std::ptr;
+use std::sync::LazyLock;
 
 mod cache;
 mod dynasm;
 mod lss;
 mod result;
+mod trampoline;
 
-unsafe fn write_mem_ignore_perm(addr: usize, data: &[u8]) -> WispResult<()> {
-    let mut file = OpenOptions::new().write(true).open("/proc/self/mem")?;
+static PAGE_SIZE: LazyLock<usize> =
+    LazyLock::new(|| unsafe { libc::sysconf(_SC_PAGESIZE) as usize });
 
-    file.seek(io::SeekFrom::Start(addr as _))?;
-    file.write_all(data)?;
-    file.flush()?;
-
-    Ok(())
+fn page_start(ptr: *const c_void) -> *const c_void {
+    ((ptr as usize) & !(*PAGE_SIZE - 1)) as _
 }
 
-// Todo: unhook
-unsafe fn hook_replace(target_fn: usize, replace_fn: usize) -> WispResult<()> {
-    let branch = asmgen!(
-        ; movz x17, #(replace_fn & 0xffff) as _
-        ; movk x17, #((replace_fn >> 16) & 0xffff) as _, lsl #16
-        ; movk x17, #((replace_fn >> 32) & 0xffff) as _, lsl #32
-        ; br x17
-    );
+fn page_end(ptr: *const c_void) -> *const c_void {
+    ((ptr as usize).div_ceil(*PAGE_SIZE) * *PAGE_SIZE) as _
+}
 
-    unsafe {
-        write_mem_ignore_perm(target_fn, &branch)?;
-        cache::clear_cache(target_fn, branch.len())?;
+pub struct Wisp {
+    allocator: TrampolineAllocator,
+}
+
+impl Wisp {
+    pub fn new(buffer_size: usize) -> WispResult<Self> {
+        Ok(Self {
+            allocator: TrampolineAllocator::new(buffer_size)?,
+        })
     }
 
-    Ok(())
+    unsafe fn write_mem_ignore_perm(addr: *const c_void, data: &[u8]) -> WispResult<()> {
+        let mut file = OpenOptions::new().write(true).open("/proc/self/mem")?;
+
+        file.seek(SeekFrom::Start(addr as _))?;
+        file.write_all(data)?;
+        file.flush()?;
+
+        Ok(())
+    }
+
+    pub unsafe fn replace_fn(target_fn: *const c_void, proxy_fn: *const c_void) -> WispResult<()> {
+        let branch_insn = {
+            let proxy_fn = proxy_fn as usize;
+            asmgen!(
+                ; movz x17, #(proxy_fn & 0xffff) as _
+                ; movk x17, #((proxy_fn >> 16) & 0xffff) as _, lsl #16
+                ; movk x17, #((proxy_fn >> 32) & 0xffff) as _, lsl #32
+                ; br x17
+            )
+        };
+
+        unsafe {
+            let mprotect_addr = page_start(target_fn);
+            let mprotect_size =
+                page_end(target_fn.add(branch_insn.len())).byte_offset_from_unsigned(mprotect_addr);
+
+            lss::mprotect(
+                mprotect_addr as _,
+                mprotect_size,
+                PROT_READ | PROT_WRITE | PROT_EXEC,
+            )?;
+            ptr::copy_nonoverlapping(branch_insn.as_ptr(), target_fn as _, branch_insn.len());
+            lss::mprotect(
+                mprotect_addr as _,
+                mprotect_size,
+                PROT_READ | PROT_EXEC,
+            )?; // Fixme: perms
+            // Self::write_mem_ignore_perm(target_fn, &branch_insn)?;
+        }
+
+        Ok(())
+    }
+
+    pub unsafe fn hook_fn(
+        &mut self,
+        target_fn: *const c_void,
+        proxy_fn: *const c_void,
+        backup_orig: &mut *const c_void,
+    ) -> WispResult<()> {
+        let branch_insn = {
+            let proxy_fn = proxy_fn as usize;
+            asmgen!(
+                ; movz x17, #(proxy_fn & 0xffff) as _
+                ; movk x17, #((proxy_fn >> 16) & 0xffff) as _, lsl #16
+                ; movk x17, #((proxy_fn >> 32) & 0xffff) as _, lsl #32
+                ; br x17
+            )
+        };
+
+        let trampoline_insn = {
+            let target_fn = unsafe { target_fn.add(branch_insn.len()) as usize };
+            asmgen!(
+                // (copy backup instructions before this)
+                ; movz x17, #(target_fn & 0xffff) as _
+                ; movk x17, #((target_fn >> 16) & 0xffff) as _, lsl #16
+                ; movk x17, #((target_fn >> 32) & 0xffff) as _, lsl #32
+                ; br x17
+            )
+        };
+
+        let trampoline = self
+            .allocator
+            .alloc(branch_insn.len() + trampoline_insn.len())?;
+
+        unsafe {
+            // 1. backup the original instructions from `target_fn` to the trampoline
+            ptr::copy_nonoverlapping(target_fn, trampoline.as_ptr() as _, branch_insn.len());
+
+            // 2. branch `target_fn` to `proxy_fn`
+            let mprotect_addr = page_start(target_fn);
+            let mprotect_size =
+                page_end(target_fn.add(branch_insn.len())).byte_offset_from_unsigned(mprotect_addr);
+
+            lss::mprotect(
+                mprotect_addr as _,
+                mprotect_size as _,
+                PROT_READ | PROT_WRITE | PROT_EXEC,
+            )?;
+            ptr::copy_nonoverlapping(branch_insn.as_ptr(), target_fn as _, branch_insn.len());
+            lss::mprotect(
+                mprotect_addr as _,
+                mprotect_size as _,
+                PROT_READ | PROT_EXEC,
+            )?; // Fixme: perms
+
+            // 3. branch `backup_orig` to original `target_fn`
+            ptr::copy_nonoverlapping(
+                trampoline_insn.as_ptr() as _,
+                trampoline.as_ptr().add(branch_insn.len()) as _,
+                trampoline_insn.len(),
+            );
+        }
+
+        *backup_orig = trampoline.as_ptr() as _;
+
+        cache::clear_cache(target_fn, branch_insn.len())?;
+        cache::clear_cache(trampoline.as_ptr() as _, trampoline.len())?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{hook_replace, lss};
+    use crate::{lss, Wisp};
     use dynasmrt::{dynasm, DynasmApi};
-    use libc::{c_char, size_t, MAP_ANONYMOUS, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRITE};
+    use libc::{MAP_ANONYMOUS, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRITE};
     use procfs::process::{MMPermissions, MMapPath, Process};
+    use std::ffi::c_void;
     use std::sync::mpsc;
     use std::time::Duration;
     use std::{mem, process, ptr, thread};
-
-    unsafe extern "C" {
-        fn strlen(s: *const c_char) -> size_t;
-    }
-
-    #[test]
-    fn test_find_strlen() {
-        assert_ne!(strlen as usize, 0);
-    }
 
     #[test]
     fn test_mmap_trampoline() {
@@ -167,23 +273,50 @@ mod tests {
     }
 
     #[test]
-    fn test_hook_replace() {
-        fn target_fn(a: i32, b: i32) -> i32 {
+    fn test_replace() {
+        extern "C" fn target_fn(a: i32, b: i32) -> i32 {
             a + b
         }
 
-        fn replace_fn(a: i32, b: i32) -> i32 {
+        extern "C" fn proxy_fn(a: i32, b: i32) -> i32 {
             a * b
         }
 
         unsafe {
-            hook_replace(target_fn as _, replace_fn as _).expect("failed to install hook");
+            Wisp::replace_fn(target_fn as _, proxy_fn as _).expect("failed to replace func");
         }
 
         for _ in 0..100 {
             let a = fastrand::i32(-1000..1000);
             let b = fastrand::i32(-1000..1000);
-            assert_eq!(target_fn(a, b), replace_fn(a, b));
+            assert_eq!(target_fn(a, b), proxy_fn(a, b));
+        }
+    }
+
+    #[test]
+    fn test_hook() {
+        let mut wisp = Wisp::new(1024 * 1024).expect("failed to create wisp");
+        let mut orig_fn: Box<*const c_void> = Box::new(ptr::null_mut());
+
+        extern "C" fn target_fn(a: i32, b: i32) -> i32 {
+            a + b
+        }
+
+        extern "C" fn proxy_fn(a: i32, b: i32) -> i32 {
+            a * b
+        }
+
+        unsafe {
+            wisp.hook_fn(target_fn as _, proxy_fn as _, orig_fn.as_mut())
+                .expect("failed to hook func");
+        }
+
+        assert_ne!(orig_fn.as_mut(), &mut ptr::null());
+
+        for _ in 0..100 {
+            let a = fastrand::i32(-1000..1000);
+            let b = fastrand::i32(-1000..1000);
+            assert_eq!(target_fn(a, b), proxy_fn(a, b));
         }
     }
 }
