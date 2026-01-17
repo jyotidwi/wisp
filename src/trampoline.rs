@@ -6,8 +6,8 @@ use linked_list_allocator::Heap;
 use std::alloc::Layout;
 use std::fmt::{Debug, Formatter};
 use std::ops::{Deref, DerefMut};
-use std::{any, fmt, ptr};
 use std::ptr::NonNull;
+use std::{fmt, ptr};
 
 pub(crate) struct Trampoline<'a>(&'a mut [u8]);
 

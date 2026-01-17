@@ -2,8 +2,8 @@ extern crate core;
 
 use crate::result::WispResult;
 use crate::trampoline::TrampolineAllocator;
-use dynasmrt::{dynasm, DynasmApi};
-use libc::{PROT_EXEC, PROT_READ, PROT_WRITE, _SC_PAGESIZE};
+use dynasmrt::{DynasmApi, dynasm};
+use libc::{_SC_PAGESIZE, PROT_EXEC, PROT_READ, PROT_WRITE};
 use std::ffi::c_void;
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
@@ -70,11 +70,7 @@ impl Wisp {
                 PROT_READ | PROT_WRITE | PROT_EXEC,
             )?;
             ptr::copy_nonoverlapping(branch_insn.as_ptr(), target_fn as _, branch_insn.len());
-            lss::mprotect(
-                mprotect_addr as _,
-                mprotect_size,
-                PROT_READ | PROT_EXEC,
-            )?; // Fixme: perms
+            lss::mprotect(mprotect_addr as _, mprotect_size, PROT_READ | PROT_EXEC)?; // Fixme: perms
             // Self::write_mem_ignore_perm(target_fn, &branch_insn)?;
         }
 
@@ -152,8 +148,8 @@ impl Wisp {
 
 #[cfg(test)]
 mod tests {
-    use crate::{lss, Wisp};
-    use dynasmrt::{dynasm, DynasmApi};
+    use crate::{Wisp, lss};
+    use dynasmrt::{DynasmApi, dynasm};
     use libc::{MAP_ANONYMOUS, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRITE};
     use procfs::process::{MMPermissions, MMapPath, Process};
     use std::ffi::c_void;
@@ -295,23 +291,32 @@ mod tests {
 
     #[test]
     fn test_hook() {
+        static mut ORIG_FN: *const c_void = ptr::null_mut();
+
         let mut wisp = Wisp::new(1024 * 1024).expect("failed to create wisp");
-        let mut orig_fn: Box<*const c_void> = Box::new(ptr::null_mut());
 
         extern "C" fn target_fn(a: i32, b: i32) -> i32 {
             a + b
         }
 
         extern "C" fn proxy_fn(a: i32, b: i32) -> i32 {
+            unsafe {
+                assert_eq!(
+                    mem::transmute::<*const c_void, fn(i32, i32) -> i32>(ORIG_FN)(a, b),
+                    a + b
+                );
+            }
+
             a * b
         }
 
+        #[allow(static_mut_refs)]
         unsafe {
-            wisp.hook_fn(target_fn as _, proxy_fn as _, orig_fn.as_mut())
+            wisp.hook_fn(target_fn as _, proxy_fn as _, &mut ORIG_FN)
                 .expect("failed to hook func");
         }
 
-        assert_ne!(orig_fn.as_mut(), &mut ptr::null());
+        assert!(unsafe { !ORIG_FN.is_null() });
 
         for _ in 0..100 {
             let a = fastrand::i32(-1000..1000);
