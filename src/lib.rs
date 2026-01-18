@@ -83,6 +83,13 @@ impl<U: Unhooker> Drop for Stub<U> {
 pub struct CustomWisp<U: Unhooker = SimpleUnhooker>(PhantomData<fn(U) -> U>);
 
 impl<U: Unhooker> CustomWisp<U> {
+    /// Replaces the target function with a proxy function.
+    ///
+    /// # Safety
+    ///
+    /// - `target_fn` and `proxy_fn` must be valid pointers to executable code.
+    /// - The caller must ensure that the target function is not being executed by other threads
+    ///   simultaneously to avoid race conditions during the patching process.
     pub unsafe fn replace_fn(
         target_fn: *const c_void,
         proxy_fn: *const c_void,
@@ -104,6 +111,14 @@ impl<U: Unhooker> CustomWisp<U> {
         Ok(Stub::new(target_fn, backup_insn, region, Vec::new()))
     }
 
+    /// Hooks the target function, allowing the proxy function to call the original implementation.
+    ///
+    /// # Safety
+    ///
+    /// - `target_fn` and `proxy_fn` must be valid pointers to executable code.
+    /// - `backup_orig` must be a valid mutable reference to a pointer.
+    /// - The caller must ensure that the target function is not being executed by other threads
+    ///   simultaneously to avoid race conditions during the patching process.
     pub unsafe fn hook_fn(
         target_fn: *const c_void,
         proxy_fn: *const c_void,
