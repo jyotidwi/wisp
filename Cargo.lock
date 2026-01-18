@@ -604,6 +604,7 @@ dependencies = [
  "dynasmrt",
  "fastrand",
  "libc 1.0.0-alpha.2",
+ "log",
  "procfs",
  "region",
  "thiserror",
