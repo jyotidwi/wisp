@@ -127,14 +127,18 @@ impl<U: Unhooker> CustomWisp<U> {
         let region = region::query(target_fn)?;
         let branch_insn = asm::branch_to(proxy_fn)?;
 
+        let backup_region = unsafe { slice::from_raw_parts(target_fn as _, branch_insn.len()) };
+        let mut backup_insn = Vec::new();
+
+        backup_insn.extend_from_slice(backup_region);
+
         let trampoline_insn = unsafe {
-            let backup_insn = slice::from_raw_parts(target_fn as *const u8, branch_insn.len());
             let target_next = target_fn.add(branch_insn.len()) as usize;
 
             let mut ops = Assembler::new()?;
 
             arm64asm!(ops
-                ;; ops.extend(backup_insn)
+                ;; ops.extend(&backup_insn)
                 ; movz x17, #(target_next & 0xffff) as _
                 ; movk x17, #((target_next >> 16) & 0xffff) as _, lsl #16
                 ; movk x17, #((target_next >> 32) & 0xffff) as _, lsl #32
@@ -144,12 +148,6 @@ impl<U: Unhooker> CustomWisp<U> {
 
             ops.assemble()?
         };
-
-        let backup_region = unsafe { slice::from_raw_parts(target_fn as _, branch_insn.len()) };
-
-        let mut backup_insn = Vec::new();
-
-        backup_insn.extend_from_slice(backup_region);
 
         unsafe {
             mman::write_memory(target_fn, &branch_insn)?;
