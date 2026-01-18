@@ -1,6 +1,6 @@
 # Wisp
 
-A lightweight Rust library for runtime function hooking on ARM64/AArch64 architectures.
+![wisp](https://socialify.git.ci/Mufanc/wisp/image?custom_description=A+lightweight+Rust+library+for+inline+hooking+on+Android&custom_language=Rust&description=1&font=Inter&forks=1&language=1&name=1&owner=1&pattern=Plus&stargazers=1&theme=Light)
 
 ## Overview
 
