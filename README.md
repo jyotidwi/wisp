@@ -10,6 +10,7 @@ Wisp provides runtime function hooking capabilities for ARM64 platforms, primari
 
 - **Function Replacement**: Replace target functions entirely with proxy implementations
 - **Function Hooking**: Intercept function calls while preserving access to original implementation
+- **Dynamic Original Function**: Retrieve original function pointer dynamically via `orig_fn!()` macro
 - **Automatic Unhooking**: Automatically restores original function code when stub is dropped
 - **Instruction Cache Synchronization**: Ensures cache coherency after code modifications
 
@@ -82,6 +83,39 @@ unsafe {
 }
 ```
 
+### Dynamic Original Function
+
+Use `orig_fn!()` macro to dynamically retrieve the original function without static variables:
+
+```rust
+use wisp::{Wisp, orig_fn};
+use std::ffi::c_void;
+use std::mem;
+
+extern "C" fn target_fn(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+extern "C" fn proxy_fn(a: i32, b: i32) -> i32 {
+    let orig_fn = orig_fn!();
+    
+    // Call original function
+    let result = unsafe {
+        mem::transmute::<*const c_void, fn(i32, i32) -> i32>(orig_fn)(a, b)
+    };
+    
+    // Modify behavior
+    result * 2
+}
+
+unsafe {
+    let _stub = Wisp::hook_fn(target_fn as _, proxy_fn as _, None)
+        .expect("failed to hook function");
+    
+    assert_eq!(target_fn(2, 3), 10); // (2 + 3) * 2
+}
+```
+
 ### Custom Unhook Behavior
 
 Implement custom unhooking logic with the `Unhooker` trait:
@@ -130,11 +164,15 @@ Replaces the target function with a proxy function.
 pub unsafe fn hook_fn(
     target_fn: *const c_void,
     proxy_fn: *const c_void,
-    backup_orig: &mut *const c_void,
+    backup_orig: &mut *const c_void | None,
 ) -> WispResult<Stub<U>>
 ```
 
-Hooks the target function while preserving access to the original implementation via `backup_orig`.
+Hooks the target function while preserving access to the original implementation. Pass `&mut ptr` to store the original function pointer, or `None` to use the `orig_fn!()` macro instead.
+
+#### `orig_fn!()`
+
+Macro to dynamically retrieve the original function pointer within a proxy function. **Must be called at the beginning of the proxy function**. Only works when `hook_fn` was called with `None` for `backup_orig`.
 
 ## Limitations
 
