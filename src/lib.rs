@@ -133,7 +133,7 @@ impl<U: Unhooker> CustomWisp<U> {
         backup_insn.extend_from_slice(backup_region);
 
         let trampoline_insn = unsafe {
-            let target_next = target_fn.add(branch_insn.len()) as usize;
+            let target_next = target_fn.byte_add(branch_insn.len()) as usize;
 
             let mut ops = Assembler::new()?;
 

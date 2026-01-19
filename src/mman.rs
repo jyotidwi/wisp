@@ -21,7 +21,7 @@ unsafe fn write_mem_with_mprotect(addr: *const c_void, data: &[u8]) -> WispResul
     unsafe {
         let mprotect_addr = addr.page_start();
         let mprotect_size = addr
-            .add(data.len())
+            .byte_add(data.len())
             .page_end()
             .byte_offset_from_unsigned(mprotect_addr);
 
