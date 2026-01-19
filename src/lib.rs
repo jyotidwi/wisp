@@ -1,6 +1,7 @@
 use crate::asm::{Assemble, BRANCH_LEN};
 use crate::result::WispResult;
 use core::slice;
+use core::sync::atomic::{compiler_fence, Ordering};
 use dynasmrt::aarch64::Assembler;
 use dynasmrt::{ExecutableBuffer, cache_control};
 use log::warn;
@@ -26,11 +27,13 @@ pub struct SimpleUnhooker;
 impl Unhooker for SimpleUnhooker {
     fn unhook(stub: &Stub<Self>) -> WispResult<()> {
         unsafe {
+            compiler_fence(Ordering::SeqCst);
             mman::write_memory(stub.target, &stub.backup_insn)?;
             cache_control::synchronize_icache(slice::from_raw_parts(
                 stub.target as _,
                 stub.backup_insn.len(),
             ));
+            compiler_fence(Ordering::SeqCst);
         }
 
         Ok(())
@@ -141,8 +144,10 @@ impl<U: Unhooker> CustomWisp<U> {
         };
 
         unsafe {
+            compiler_fence(Ordering::SeqCst);
             mman::write_memory(target_fn, &branch_insn)?;
             cache_control::synchronize_icache(backup_region);
+            compiler_fence(Ordering::SeqCst);
         }
 
         Ok(Stub::new(target_fn, backup_insn, region, Vec::new()))
@@ -217,8 +222,10 @@ impl<U: Unhooker> CustomWisp<U> {
         )?;
 
         unsafe {
+            compiler_fence(Ordering::SeqCst);
             mman::write_memory(target_fn, &branch_insn)?;
             cache_control::synchronize_icache(backup_region);
+            compiler_fence(Ordering::SeqCst);
         }
 
         if let Some(backup_orig) = backup_orig {
