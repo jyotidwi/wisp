@@ -3,6 +3,8 @@ use dynasmrt::ExecutableBuffer;
 use dynasmrt::aarch64::Assembler;
 use std::ffi::c_void;
 
+pub(crate) const BRANCH_LEN: usize = 16;
+
 pub(crate) trait Assemble<T> {
     fn assemble(self) -> WispResult<T>;
 }
@@ -17,10 +19,12 @@ impl Assemble<ExecutableBuffer> for Assembler {
 macro_rules! arm64asm {
      ($ops:ident $($t:tt)*) => {
          {
+             #[allow(unused_imports)]
              use dynasmrt::{dynasm, DynasmApi};
 
              dynasm!($ops
                  ; .arch aarch64
+                 ; .alias ip, x17
                  ; .alias fp, x29
                  ; .alias lr, x30
                  $($t)*
@@ -34,10 +38,10 @@ pub(crate) fn branch_to(addr: *const c_void) -> WispResult<Vec<u8>> {
     let mut ops = Assembler::new()?;
 
     arm64asm!(ops
-        ; movz x17, #(proxy_fn & 0xffff) as _
-        ; movk x17, #((proxy_fn >> 16) & 0xffff) as _, lsl #16
-        ; movk x17, #((proxy_fn >> 32) & 0xffff) as _, lsl #32
-        ; br x17
+        ; movz ip, #(proxy_fn & 0xffff) as _
+        ; movk ip, #((proxy_fn >> 16) & 0xffff) as _, lsl #16
+        ; movk ip, #((proxy_fn >> 32) & 0xffff) as _, lsl #32
+        ; br ip
     );
 
     Ok(ops.assemble()?.to_vec())

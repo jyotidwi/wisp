@@ -1,4 +1,4 @@
-use crate::asm::Assemble;
+use crate::asm::{Assemble, BRANCH_LEN};
 use crate::result::WispResult;
 use core::slice;
 use dynasmrt::aarch64::Assembler;
@@ -13,6 +13,9 @@ mod asm;
 mod errno;
 mod mman;
 mod result;
+
+#[cfg(test)]
+mod tests;
 
 pub trait Unhooker: Sized {
     fn unhook(stub: &Stub<Self>) -> WispResult<()>;
@@ -79,6 +82,38 @@ impl<U: Unhooker> Drop for Stub<U> {
     }
 }
 
+pub trait IntoOrigAddr<'a> {
+    fn into_orig_addr(self) -> Option<&'a mut *const c_void>;
+}
+
+impl<'a> IntoOrigAddr<'a> for &'a mut *const c_void {
+    fn into_orig_addr(self) -> Option<&'a mut *const c_void> {
+        Some(self)
+    }
+}
+
+impl<'a> IntoOrigAddr<'a> for Option<&'a mut *const c_void> {
+    fn into_orig_addr(self) -> Option<&'a mut *const c_void> {
+        self
+    }
+}
+
+#[macro_export]
+macro_rules! orig_fn {
+    () => {
+        unsafe {
+            let ptr: *const core::ffi::c_void;
+            core::arch::asm!(
+                "mov {tmp}, x30",
+                "ldr {ptr}, [{tmp}, #8]",
+                tmp = out(reg) _,
+                ptr = out(reg) ptr,
+            );
+            ptr
+        }
+    };
+}
+
 #[derive(Copy, Clone)]
 pub struct CustomWisp<U: Unhooker = SimpleUnhooker>(PhantomData<fn(U) -> U>);
 
@@ -95,13 +130,15 @@ impl<U: Unhooker> CustomWisp<U> {
         proxy_fn: *const c_void,
     ) -> WispResult<Stub<U>> {
         let region = region::query(target_fn)?;
+
         let branch_insn = asm::branch_to(proxy_fn)?;
 
-        let backup_region = unsafe { slice::from_raw_parts(target_fn as _, branch_insn.len()) };
-
-        let mut backup_insn = Vec::new();
-
-        backup_insn.extend_from_slice(backup_region);
+        let backup_region = unsafe { slice::from_raw_parts(target_fn as _, BRANCH_LEN) };
+        let backup_insn = {
+            let mut backup = Vec::new();
+            backup.extend_from_slice(backup_region);
+            backup
+        };
 
         unsafe {
             mman::write_memory(target_fn, &branch_insn)?;
@@ -119,204 +156,83 @@ impl<U: Unhooker> CustomWisp<U> {
     /// - `backup_orig` must be a valid mutable reference to a pointer.
     /// - The caller must ensure that the target function is not being executed by other threads
     ///   simultaneously to avoid race conditions during the patching process.
-    pub unsafe fn hook_fn(
+    pub unsafe fn hook_fn<'a, B: IntoOrigAddr<'a>>(
         target_fn: *const c_void,
         proxy_fn: *const c_void,
-        backup_orig: &mut *const c_void,
+        backup_orig: B,
     ) -> WispResult<Stub<U>> {
         let region = region::query(target_fn)?;
-        let branch_insn = asm::branch_to(proxy_fn)?;
+        let backup_orig = backup_orig.into_orig_addr();
+        let mut trampolines = Vec::new();
 
-        let backup_region = unsafe { slice::from_raw_parts(target_fn as _, branch_insn.len()) };
-        let mut backup_insn = Vec::new();
-
-        backup_insn.extend_from_slice(backup_region);
+        let backup_region = unsafe { slice::from_raw_parts(target_fn as _, BRANCH_LEN) };
+        let backup_insn = {
+            let mut backup = Vec::new();
+            backup.extend_from_slice(backup_region);
+            backup
+        };
 
         let trampoline_insn = unsafe {
-            let target_next = target_fn.byte_add(branch_insn.len()) as usize;
-
+            let target_next = target_fn.byte_add(BRANCH_LEN) as usize;
             let mut ops = Assembler::new()?;
 
             arm64asm!(ops
                 ;; ops.extend(&backup_insn)
-                ; movz x17, #(target_next & 0xffff) as _
-                ; movk x17, #((target_next >> 16) & 0xffff) as _, lsl #16
-                ; movk x17, #((target_next >> 32) & 0xffff) as _, lsl #32
-                ; br x17
+                ; movz ip, #(target_next & 0xffff) as _
+                ; movk ip, #((target_next >> 16) & 0xffff) as _, lsl #16
+                ; movk ip, #((target_next >> 32) & 0xffff) as _, lsl #32
+                ; br ip
                 ; brk #0
             );
 
             ops.assemble()?
         };
 
+        let helper_insn = if backup_orig.is_none() {
+            let proxy_fn = proxy_fn as usize;
+            let mut ops = Assembler::new()?;
+
+            arm64asm!(ops
+                ; stp fp, lr, [sp, #-16]!
+                ; mov fp, sp
+                ; movz ip, #(proxy_fn & 0xffff) as _
+                ; movk ip, #((proxy_fn >> 16) & 0xffff) as _, lsl #16
+                ; movk ip, #((proxy_fn >> 32) & 0xffff) as _, lsl #32
+                ; blr ip
+                ; ldp fp, lr, [sp], #16
+                ; ret
+                ;; ops.push_u64(trampoline_insn.as_ptr() as _)
+            );
+
+            Some(ops.assemble()?)
+        } else {
+            None
+        };
+
+        let branch_insn = asm::branch_to(
+            helper_insn
+                .as_ref()
+                .map(|it| it.as_ptr() as _)
+                .unwrap_or(proxy_fn),
+        )?;
+
         unsafe {
             mman::write_memory(target_fn, &branch_insn)?;
             cache_control::synchronize_icache(backup_region);
         }
 
-        *backup_orig = trampoline_insn.as_ptr() as _;
+        if let Some(backup_orig) = backup_orig {
+            *backup_orig = trampoline_insn.as_ptr() as _;
+        }
 
-        Ok(Stub::new(
-            target_fn,
-            backup_insn,
-            region,
-            vec![trampoline_insn],
-        ))
+        trampolines.push(trampoline_insn);
+
+        if let Some(helper_insn) = helper_insn {
+            trampolines.push(helper_insn)
+        }
+
+        Ok(Stub::new(target_fn, backup_insn, region, trampolines))
     }
 }
 
 pub type Wisp = CustomWisp<SimpleUnhooker>;
-
-#[cfg(test)]
-mod tests {
-    use crate::Wisp;
-    use libc::{PROT_EXEC, PROT_READ, PROT_WRITE};
-    use region::Protection;
-    use std::ffi::c_void;
-    use std::{mem, ptr};
-
-    macro_rules! repeat {
-        ($n: literal, $($body:tt)*) => {
-            for _ in 0..$n {
-                $($body)*
-            }
-        };
-    }
-
-    #[test]
-    fn test_region_flags() {
-        assert_eq!(Protection::READ.bits() as i32, PROT_READ);
-        assert_eq!(Protection::WRITE.bits() as i32, PROT_WRITE);
-        assert_eq!(Protection::EXECUTE.bits() as i32, PROT_EXEC);
-    }
-
-    #[test]
-    fn test_replace() {
-        extern "C" fn target_fn(a: i32, b: i32) -> i32 {
-            a + b
-        }
-
-        extern "C" fn proxy_fn(a: i32, b: i32) -> i32 {
-            a * b
-        }
-
-        let _keep = unsafe {
-            Wisp::replace_fn(target_fn as _, proxy_fn as _).expect("failed to replace func")
-        };
-
-        repeat!(100, {
-            let a = fastrand::i32(-1000..1000);
-            let b = fastrand::i32(-1000..1000);
-            assert_eq!(target_fn(a, b), proxy_fn(a, b));
-        })
-    }
-
-    #[test]
-    fn test_hook() {
-        static mut ORIG_FN: *const c_void = ptr::null_mut();
-
-        extern "C" fn target_fn(a: i32, b: i32) -> i32 {
-            a + b
-        }
-
-        extern "C" fn proxy_fn(a: i32, b: i32) -> i32 {
-            unsafe {
-                assert_eq!(
-                    mem::transmute::<*const c_void, fn(i32, i32) -> i32>(ORIG_FN)(a, b),
-                    a + b
-                );
-            }
-
-            a * b
-        }
-
-        #[allow(static_mut_refs)]
-        let _keep = unsafe {
-            Wisp::hook_fn(target_fn as _, proxy_fn as _, &mut ORIG_FN).expect("failed to hook func")
-        };
-
-        assert!(unsafe { !ORIG_FN.is_null() });
-
-        repeat!(100, {
-            let a = fastrand::i32(-1000..1000);
-            let b = fastrand::i32(-1000..1000);
-            assert_eq!(target_fn(a, b), proxy_fn(a, b));
-        })
-    }
-
-    #[test]
-    fn test_unhook() {
-        extern "C" fn replace_target(a: i32, b: i32) -> i32 {
-            a + b
-        }
-
-        extern "C" fn hook_target(a: i32, b: i32) -> i32 {
-            a + b
-        }
-
-        extern "C" fn proxy_fn(a: i32, b: i32) -> i32 {
-            a * b
-        }
-
-        repeat!(100, {
-            let a = fastrand::i32(-1000..1000);
-            let b = fastrand::i32(-1000..1000);
-            assert_eq!(replace_target(a, b), a + b);
-            assert_eq!(hook_target(a, b), a + b);
-        });
-
-        let replace_stub = unsafe {
-            Wisp::replace_fn(replace_target as _, proxy_fn as _).expect("failed to replace func")
-        };
-
-        let mut orig_fn: *const c_void = ptr::null_mut();
-        let hook_stub = unsafe {
-            Wisp::hook_fn(hook_target as _, proxy_fn as _, &mut orig_fn)
-                .expect("failed to hook func")
-        };
-
-        repeat!(100, {
-            let a = fastrand::i32(-1000..1000);
-            let b = fastrand::i32(-1000..1000);
-            assert_eq!(replace_target(a, b), a * b);
-            assert_eq!(hook_target(a, b), a * b);
-        });
-
-        drop(replace_stub);
-        drop(hook_stub);
-
-        repeat!(100, {
-            let a = fastrand::i32(-1000..1000);
-            let b = fastrand::i32(-1000..1000);
-            assert_eq!(replace_target(a, b), a + b);
-            assert_eq!(hook_target(a, b), a + b);
-        });
-    }
-
-    #[test]
-    #[ignore]
-    fn test_unwind() {
-        static mut ORIG_FN: *const c_void = ptr::null_mut();
-
-        extern "C" fn target_fn(a: i32, b: i32) -> i32 {
-            unsafe {
-                libc::raise(35);
-            }
-            a + b
-        }
-
-        extern "C" fn proxy_fn(a: i32, b: i32) -> i32 {
-            unsafe { mem::transmute::<*const c_void, fn(i32, i32) -> i32>(ORIG_FN)(a, b) }
-        }
-
-        #[allow(static_mut_refs)]
-        unsafe {
-            Wisp::hook_fn(target_fn as _, proxy_fn as _, &mut ORIG_FN)
-                .expect("failed to hook func");
-        }
-
-        assert!(unsafe { !ORIG_FN.is_null() });
-
-        target_fn(3, 5);
-    }
-}
