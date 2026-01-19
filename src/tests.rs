@@ -160,25 +160,42 @@ fn test_unhook() {
 #[test]
 #[ignore]
 fn test_unwind() {
-    static mut ORIG_FN: *const c_void = ptr::null_mut();
+    static mut ORIG_FN_1: *const c_void = ptr::null_mut();
 
-    extern "C" fn target_fn(a: i32, b: i32) -> i32 {
+    extern "C" fn target_fn_1(a: i32, b: i32) -> i32 {
         unsafe {
             libc::raise(35);
         }
         a + b
     }
 
-    extern "C" fn proxy_fn(a: i32, b: i32) -> i32 {
-        unsafe { mem::transmute::<*const c_void, fn(i32, i32) -> i32>(ORIG_FN)(a, b) }
+    extern "C" fn proxy_fn_1(a: i32, b: i32) -> i32 {
+        unsafe { mem::transmute::<*const c_void, fn(i32, i32) -> i32>(ORIG_FN_1)(a, b) }
     }
 
     #[allow(static_mut_refs)]
     unsafe {
-        Wisp::hook_fn(target_fn as _, proxy_fn as _, &mut ORIG_FN).expect("failed to hook func");
+        Wisp::hook_fn(target_fn_1 as _, proxy_fn_1 as _, &mut ORIG_FN_1).expect("failed to hook func");
     }
 
-    assert!(unsafe { !ORIG_FN.is_null() });
+    target_fn_1(3, 5);
 
-    target_fn(3, 5);
+    extern "C" fn target_fn_2(a: i32, b: i32) -> i32 {
+        unsafe {
+            libc::raise(35);
+        }
+        a + b
+    }
+
+    extern "C" fn proxy_fn_2(a: i32, b: i32) -> i32 {
+        let orig_fn = orig_fn!();
+        unsafe { mem::transmute::<*const c_void, fn(i32, i32) -> i32>(orig_fn)(a, b) }
+    }
+
+    #[allow(static_mut_refs)]
+    unsafe {
+        Wisp::hook_fn(target_fn_2 as _, proxy_fn_2 as _, None).expect("failed to hook func");
+    }
+
+    target_fn_2(3, 5);
 }

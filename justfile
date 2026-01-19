@@ -12,5 +12,11 @@ test:
         --target aarch64-linux-android \
         --config target.aarch64-linux-android.linker=\"{{CC}}\"
 
+test-unwind:
+    cargo test \
+        --target aarch64-linux-android \
+        --config target.aarch64-linux-android.linker=\"{{CC}}\" \
+        unwind -- --ignored
+
 clean:
     cargo clean
