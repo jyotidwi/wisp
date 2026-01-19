@@ -67,7 +67,8 @@ fn test_hook() {
 
     #[allow(static_mut_refs)]
     let _keep = unsafe {
-        Wisp::hook_fn(target_fn as _, proxy_fn as _, &mut ORIG_FN).expect("failed to hook func")
+        Wisp::hook_fn(target_fn as _, proxy_fn as _, Some(&mut ORIG_FN))
+            .expect("failed to hook func")
     };
 
     assert!(unsafe { !ORIG_FN.is_null() });
@@ -136,7 +137,8 @@ fn test_unhook() {
 
     let mut orig_fn: *const c_void = ptr::null_mut();
     let hook_stub = unsafe {
-        Wisp::hook_fn(hook_target as _, proxy_fn as _, &mut orig_fn).expect("failed to hook func")
+        Wisp::hook_fn(hook_target as _, proxy_fn as _, Some(&mut orig_fn))
+            .expect("failed to hook func")
     };
 
     repeat!(100, {
@@ -175,7 +177,8 @@ fn test_unwind() {
 
     #[allow(static_mut_refs)]
     unsafe {
-        Wisp::hook_fn(target_fn_1 as _, proxy_fn_1 as _, &mut ORIG_FN_1).expect("failed to hook func");
+        Wisp::hook_fn(target_fn_1 as _, proxy_fn_1 as _, Some(&mut ORIG_FN_1))
+            .expect("failed to hook func");
     }
 
     target_fn_1(3, 5);

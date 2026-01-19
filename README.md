@@ -6,6 +6,8 @@
 
 Wisp provides runtime function hooking capabilities for ARM64 platforms, primarily designed for Android (aarch64-linux-android). It allows you to replace or intercept function calls at runtime by dynamically modifying executable code.
 
+> **Warning**: This library is still under development and cannot handle cases where instructions at the beginning of the target function contain PC-relative addressing instructions like `adrp`. Do not use in production environments.
+
 ## Features
 
 - **Function Replacement**: Replace target functions entirely with proxy implementations
@@ -76,7 +78,7 @@ extern "C" fn proxy_fn(a: i32, b: i32) -> i32 {
 }
 
 unsafe {
-    let _stub = Wisp::hook_fn(target_fn as _, proxy_fn as _, &mut ORIG_FN)
+    let _stub = Wisp::hook_fn(target_fn as _, proxy_fn as _, Some(&mut ORIG_FN))
         .expect("failed to hook function");
     
     assert_eq!(target_fn(2, 3), 10); // (2 + 3) * 2
@@ -164,15 +166,15 @@ Replaces the target function with a proxy function.
 pub unsafe fn hook_fn(
     target_fn: *const c_void,
     proxy_fn: *const c_void,
-    backup_orig: &mut *const c_void | None,
+    backup_orig: Option<&mut *const c_void>,
 ) -> WispResult<Stub<U>>
 ```
 
-Hooks the target function while preserving access to the original implementation. Pass `&mut ptr` to store the original function pointer, or `None` to use the `orig_fn!()` macro instead.
+Hooks the target function while preserving access to the original implementation. Pass `Some(&mut ptr)` to store the original function pointer, or `None` to skip storing.
 
 #### `orig_fn!()`
 
-Macro to dynamically retrieve the original function pointer within a proxy function. **Must be called at the beginning of the proxy function**. Only works when `hook_fn` was called with `None` for `backup_orig`.
+Macro to dynamically retrieve the original function pointer within a proxy function. **Must be called at the beginning of the proxy function**.
 
 ## Limitations
 
@@ -189,6 +191,7 @@ All hooking operations are inherently unsafe and require careful consideration:
 - Target and proxy functions must be valid pointers to executable code
 - Target functions must not be executed by other threads during patching to avoid race conditions
 - Proper synchronization is the caller's responsibility
+- Hooking functions whose first 4 instructions contain PC-relative addressing instructions (e.g., `adrp`) is **not yet supported**
 
 ## Testing
 
