@@ -17,7 +17,7 @@ impl PtrAlign for usize {
     }
 }
 
-macro_rules! impl_ptr_align {
+macro_rules! impl_trait {
     ($ty: ty) => {
         impl PtrAlign for $ty {
             fn page_start(&self) -> Self {
@@ -31,5 +31,5 @@ macro_rules! impl_ptr_align {
     };
 }
 
-impl_ptr_align!(*const c_void);
-impl_ptr_align!(*mut c_void);
+impl_trait!(*const c_void);
+impl_trait!(*mut c_void);
