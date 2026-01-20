@@ -164,7 +164,7 @@ impl<U: Unhooker> CustomWisp<U> {
         };
 
         let (buffer, trampoline) = unsafe {
-            let target_next = target_fn.byte_add(BRANCH_LEN) as usize;
+            let target_next = target_fn.byte_add(BRANCH_LEN);
             let proxy_fn = proxy_fn as usize;
 
             let mut ops = Assembler::new()?;
@@ -173,10 +173,9 @@ impl<U: Unhooker> CustomWisp<U> {
                 // pre-orig trampoline
                 ; orig:
                 ;; ops.extend(&backup_insn)  // Fixme: fix adrp etc.
-                ; movz ip, #(target_next & 0xffff) as _
-                ; movk ip, #((target_next >> 16) & 0xffff) as _, lsl #16
-                ; movk ip, #((target_next >> 32) & 0xffff) as _, lsl #32
+                ; ldr ip, #8
                 ; br ip
+                ;; ops.push_u64(target_next as _)
             );
 
             let trampoline = ops.offset();

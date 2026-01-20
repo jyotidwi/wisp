@@ -34,14 +34,12 @@ macro_rules! arm64asm {
 }
 
 pub(crate) fn branch_to(addr: *const c_void) -> WispResult<Vec<u8>> {
-    let proxy_fn = addr as usize;
     let mut ops = Assembler::new()?;
 
     arm64asm!(ops
-        ; movz ip, #(proxy_fn & 0xffff) as _
-        ; movk ip, #((proxy_fn >> 16) & 0xffff) as _, lsl #16
-        ; movk ip, #((proxy_fn >> 32) & 0xffff) as _, lsl #32
+        ; ldr ip, #8
         ; br ip
+        ;; ops.push_u64(addr as _)
     );
 
     Ok(ops.assemble()?.to_vec())
