@@ -1,5 +1,5 @@
 use crate::asm::{Assemble, BRANCH_LEN};
-use crate::result::WispResult;
+use crate::result::{WispError, WispResult};
 use core::slice;
 use core::sync::atomic::{Ordering, compiler_fence};
 use dynasmrt::aarch64::Assembler;
@@ -153,8 +153,10 @@ impl<U: Unhooker> CustomWisp<U> {
         backup_orig: Option<&mut *const c_void>,
     ) -> WispResult<Stub<U>> {
         let region = region::query(target_fn)?;
-
         let backup_region = unsafe { slice::from_raw_parts(target_fn as _, BRANCH_LEN) };
+
+        check_before_backup(backup_region)?;
+
         let backup_insn = {
             let mut backup = Vec::new();
             backup.extend_from_slice(backup_region);
@@ -215,3 +217,40 @@ impl<U: Unhooker> CustomWisp<U> {
 }
 
 pub type Wisp = CustomWisp<SimpleUnhooker>;
+
+fn is_pc_rel(insn: u32) -> bool {
+    // Branch instructions (B, BL, B_COND)
+    (insn & 0xFC000000) == 0x14000000 || // B
+    (insn & 0xFF000010) == 0x54000000 || // B_COND
+    (insn & 0xFC000000) == 0x94000000 || // BL
+
+    // Address generation instructions (ADR, ADRP)
+    (insn & 0x9F000000) == 0x10000000 || // ADR
+    (insn & 0x9F000000) == 0x90000000 || // ADRP
+
+    // Literal load instructions (LDR_LIT)
+    (insn & 0xFF000000) == 0x18000000 || // LDR_LIT_32
+    (insn & 0xFF000000) == 0x58000000 || // LDR_LIT_64
+    (insn & 0xFF000000) == 0x98000000 || // LDRSW_LIT
+    (insn & 0xFF000000) == 0xD8000000 || // PRFM_LIT
+    (insn & 0xFF000000) == 0x1C000000 || // LDR_SIMD_LIT_32
+    (insn & 0xFF000000) == 0x5C000000 || // LDR_SIMD_LIT_64
+    (insn & 0xFF000000) == 0x9C000000 || // LDR_SIMD_LIT_128
+
+    // Conditional branch instructions (CBZ, CBNZ, TBZ, TBNZ)
+    (insn & 0x7F000000) == 0x34000000 || // CBZ
+    (insn & 0x7F000000) == 0x35000000 || // CBNZ
+    (insn & 0x7F000000) == 0x36000000 || // TBZ
+    (insn & 0x7F000000) == 0x37000000    // TBNZ
+}
+
+pub(crate) fn check_before_backup(backup_region: &[u8]) -> WispResult<()> {
+    let (pf, backup_insn, sf) = unsafe { backup_region.align_to::<u32>() };
+    assert!(pf.is_empty() && sf.is_empty());
+
+    if backup_insn.iter().any(|&insn| is_pc_rel(insn)) {
+        Err(WispError::NotSupported)
+    } else {
+        Ok(())
+    }
+}

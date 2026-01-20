@@ -1,5 +1,8 @@
 use crate::asm::BRANCH_LEN;
-use crate::{Wisp, asm, orig_fn};
+use crate::result::WispError;
+use crate::{Wisp, asm, orig_fn, check_before_backup};
+use core::arch::naked_asm;
+use core::slice;
 use libc::{PROT_EXEC, PROT_READ, PROT_WRITE};
 use region::Protection;
 use std::ffi::c_void;
@@ -201,4 +204,134 @@ fn test_unwind() {
     }
 
     target_fn_2(3, 5);
+}
+
+#[test]
+fn test_verify_insn() {
+    #[unsafe(naked)]
+    extern "C" fn fn_with_nops() {
+        naked_asm!("nop", "nop", "nop", "nop", "ret")
+    }
+
+    // Branch instructions
+    #[unsafe(naked)]
+    extern "C" fn fn_with_b() {
+        naked_asm!("b 0", "ret")
+    }
+
+    #[unsafe(naked)]
+    extern "C" fn fn_with_bl() {
+        naked_asm!("bl 0", "ret")
+    }
+
+    #[unsafe(naked)]
+    extern "C" fn fn_with_b_cond() {
+        naked_asm!("b.eq 0", "ret")
+    }
+
+    // Address generation instructions
+    #[unsafe(naked)]
+    extern "C" fn fn_with_adr() {
+        naked_asm!("adr x0, 0", "ret")
+    }
+
+    #[unsafe(naked)]
+    extern "C" fn fn_with_adrp() {
+        naked_asm!("adrp x0, 0", "ret")
+    }
+
+    // Literal load instructions
+    #[unsafe(naked)]
+    extern "C" fn fn_with_ldr_lit_32() {
+        naked_asm!("ldr w0, 0", "ret")
+    }
+
+    #[unsafe(naked)]
+    extern "C" fn fn_with_ldr_lit_64() {
+        naked_asm!("ldr x0, 0", "ret")
+    }
+
+    #[unsafe(naked)]
+    extern "C" fn fn_with_ldrsw_lit() {
+        naked_asm!("ldrsw x0, 0", "ret")
+    }
+
+    #[unsafe(naked)]
+    extern "C" fn fn_with_prfm_lit() {
+        naked_asm!("prfm pldl1keep, 0", "ret")
+    }
+
+    #[unsafe(naked)]
+    extern "C" fn fn_with_ldr_simd_lit_32() {
+        naked_asm!("ldr s0, 0", "ret")
+    }
+
+    #[unsafe(naked)]
+    extern "C" fn fn_with_ldr_simd_lit_64() {
+        naked_asm!("ldr d0, 0", "ret")
+    }
+
+    #[unsafe(naked)]
+    extern "C" fn fn_with_ldr_simd_lit_128() {
+        naked_asm!("ldr q0, 0", "ret")
+    }
+
+    // Compare and branch instructions
+    #[unsafe(naked)]
+    extern "C" fn fn_with_cbz() {
+        naked_asm!("cbz x0, 0", "ret")
+    }
+
+    #[unsafe(naked)]
+    extern "C" fn fn_with_cbnz() {
+        naked_asm!("cbnz x0, 0", "ret")
+    }
+
+    #[unsafe(naked)]
+    extern "C" fn fn_with_tbz() {
+        naked_asm!("tbz x0, #0, 0", "ret")
+    }
+
+    #[unsafe(naked)]
+    extern "C" fn fn_with_tbnz() {
+        naked_asm!("tbnz x0, #0, 0", "ret")
+    }
+
+    macro_rules! test_fn {
+        ($fn:ident, $expect_ok:expr) => {{
+            let region = unsafe { slice::from_raw_parts($fn as *const u8, BRANCH_LEN) };
+            if $expect_ok {
+                assert!(check_before_backup(region).is_ok(), stringify!($fn));
+            } else {
+                assert!(matches!(check_before_backup(region), Err(WispError::NotSupported)), stringify!($fn));
+            }
+        }};
+    }
+
+    // Should pass
+    test_fn!(fn_with_nops, true);
+
+    // Branch instructions - should reject
+    test_fn!(fn_with_b, false);
+    test_fn!(fn_with_bl, false);
+    test_fn!(fn_with_b_cond, false);
+
+    // Address generation - should reject
+    test_fn!(fn_with_adr, false);
+    test_fn!(fn_with_adrp, false);
+
+    // Literal loads - should reject
+    test_fn!(fn_with_ldr_lit_32, false);
+    test_fn!(fn_with_ldr_lit_64, false);
+    test_fn!(fn_with_ldrsw_lit, false);
+    test_fn!(fn_with_prfm_lit, false);
+    test_fn!(fn_with_ldr_simd_lit_32, false);
+    test_fn!(fn_with_ldr_simd_lit_64, false);
+    test_fn!(fn_with_ldr_simd_lit_128, false);
+
+    // Compare and branch - should reject
+    test_fn!(fn_with_cbz, false);
+    test_fn!(fn_with_cbnz, false);
+    test_fn!(fn_with_tbz, false);
+    test_fn!(fn_with_tbnz, false);
 }
