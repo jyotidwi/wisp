@@ -1,6 +1,6 @@
 use crate::result::{WispError, WispResult};
-use dynasmrt::ExecutableBuffer;
-use dynasmrt::aarch64::Assembler;
+use dynasmrt::{ExecutableBuffer, VecAssembler};
+use dynasmrt::aarch64::{Aarch64Relocation, Assembler};
 use std::ffi::c_void;
 
 pub(crate) const BRANCH_LEN: usize = 16;
@@ -11,6 +11,12 @@ pub(crate) trait Assemble<T> {
 
 impl Assemble<ExecutableBuffer> for Assembler {
     fn assemble(self) -> WispResult<ExecutableBuffer> {
+        self.finalize().map_err(|_| WispError::Dynasm)
+    }
+}
+
+impl Assemble<Vec<u8>> for VecAssembler<Aarch64Relocation> {
+    fn assemble(self) -> WispResult<Vec<u8>> {
         self.finalize().map_err(|_| WispError::Dynasm)
     }
 }
@@ -34,7 +40,7 @@ macro_rules! arm64asm {
 }
 
 pub(crate) fn branch_to(addr: *const c_void) -> WispResult<Vec<u8>> {
-    let mut ops = Assembler::new()?;
+    let mut ops: VecAssembler<Aarch64Relocation> = VecAssembler::new(0);
 
     arm64asm!(ops
         ; ldr ip, #8
@@ -42,5 +48,5 @@ pub(crate) fn branch_to(addr: *const c_void) -> WispResult<Vec<u8>> {
         ;; ops.push_u64(addr as _)
     );
 
-    Ok(ops.assemble()?.to_vec())
+    ops.assemble()
 }
