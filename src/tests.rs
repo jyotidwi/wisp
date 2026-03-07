@@ -3,7 +3,7 @@ use crate::result::WispError;
 use crate::{Wisp, asm, orig_fn, check_before_backup};
 use core::arch::naked_asm;
 use core::slice;
-use libc::{PROT_EXEC, PROT_READ, PROT_WRITE};
+use libc::{c_long, PROT_EXEC, PROT_READ, PROT_WRITE};
 use region::Protection;
 use std::ffi::c_void;
 use std::{mem, ptr};
@@ -111,6 +111,50 @@ fn test_hook_dyn_orig() {
         let b = fastrand::i32(-1000..1000);
         assert_eq!(target_fn(a, b), a * b);
     })
+}
+
+#[test]
+fn test_intercept() {
+    extern "C" fn target_fn(a: u32, b: u32, c: u32, d: u32, e: u32, f: u32, g: u32, h: u32, i: u32, j: u32) {
+        assert_eq!(a, 0xAAAABBBB);
+        assert_eq!(b, 0xAA55AA55);
+        assert_eq!(c, 0xDEADBEEF);
+        assert_eq!(d, 0x12345678);
+        assert_eq!(e, 0x88888888);
+        assert_eq!(f, 0xFEE1DEAD);
+        assert_eq!(g, 0x11223344);
+        assert_eq!(h, 0x55667788);
+        assert_eq!(i, 0x99AABBCC);
+        assert_eq!(j, 0xFFFFFFFF);
+    }
+
+    extern "C" fn callback_fn(args: *mut c_long) {
+        let mut ptr = args as *mut u32;
+
+        for _ in 0 .. 10 {
+            unsafe {
+                *ptr = !*ptr;
+                ptr = ptr.byte_add(8);
+            }
+        }
+    }
+
+    let _keep = unsafe {
+        Wisp::intercept_fn(target_fn as _, callback_fn).expect("failed to intercept func")
+    };
+
+    target_fn(
+        0x55554444,
+        0x55AA55AA,
+        0x21524110,
+        0xEDCBA987,
+        0x77777777,
+        0x011E2152,
+        0xEEDDCCBB,
+        0xAA998877,
+        0x66554433,
+        0x00000000,
+    );
 }
 
 #[test]
