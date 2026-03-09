@@ -13,6 +13,7 @@ Wisp provides runtime function hooking capabilities for ARM64 platforms, primari
 - **Function Replacement**: Replace target functions entirely with proxy implementations
 - **Function Hooking**: Intercept function calls while preserving access to original implementation
 - **Dynamic Original Function**: Retrieve original function pointer dynamically via `orig_fn!()` macro
+- - **Function Interception**: Modify function arguments at runtime via a callback before the original function executes
 - **Automatic Unhooking**: Automatically restores original function code when stub is dropped
 - **Instruction Cache Synchronization**: Ensures cache coherency after code modifications
 
@@ -118,6 +119,39 @@ unsafe {
 }
 ```
 
+### Function Interception
+
+Intercept a function to modify its arguments at runtime via a callback before the original function executes:
+
+```rust
+use wisp::Wisp;
+use libc::c_long;
+
+extern "C" fn target_fn(a: u32, b: u32) -> u32 {
+    a + b
+}
+
+extern "C" fn callback_fn(args: *mut c_long) {
+    unsafe {
+        // args points to saved registers x0-x7 on the stack
+        // Modify x0 (first argument)
+        *args = 100;
+        // Modify x1 (second argument)
+        *args.add(1) = 200;
+    }
+}
+
+unsafe {
+    let _stub = Wisp::intercept_fn(target_fn as _, callback_fn)
+        .expect("failed to intercept function");
+
+    // target_fn is called with modified arguments (100, 200) regardless of input
+    assert_eq!(target_fn(1, 2), 300);
+}
+```
+
+The callback receives a pointer to the saved argument registers (x0-x7) on the stack, allowing you to read or modify any of the first 8 arguments before the original function executes.
+
 ### Custom Unhook Behavior
 
 Implement custom unhooking logic with the `Unhooker` trait:
@@ -171,6 +205,17 @@ pub unsafe fn hook_fn(
 ```
 
 Hooks the target function while preserving access to the original implementation. Pass `Some(&mut ptr)` to store the original function pointer, or `None` to skip storing.
+
+#### `Wisp::intercept_fn`
+
+```rust
+pub unsafe fn intercept_fn(
+    target_fn: *const c_void,
+    callback_fn: extern "C" fn(*mut c_long),
+) -> WispResult<Stub<U>>
+```
+
+Intercepts the target function, invoking the callback with a mutable pointer to the saved arguments on the stack before executing the original function. The callback can read or modify the arguments.
 
 #### `orig_fn!()`
 
